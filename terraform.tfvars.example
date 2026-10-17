@@ -1,0 +1,12 @@
+# Vorlage für terraform.tfvars — am einfachsten per ./configure.sh erzeugen.
+# terraform.tfvars ist per .gitignore ausgeschlossen (enthält den API-Key).
+
+digicert_url     = "https://one.digicert.com"
+digicert_api_key = "<DigiCert-ONE-API-Key>"
+profile_id       = "00000000-0000-0000-0000-000000000000"
+
+domain       = "www.example.com"
+organization = "Example GmbH"
+tags         = "terraform"
+
+cert_dir = "/etc/certs"

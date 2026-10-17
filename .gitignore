@@ -1,0 +1,17 @@
+# Terraform provider binaries und Plugin-Cache
+.terraform/
+
+# Terraform State (enthält private Schlüssel und Secrets)
+*.tfstate
+*.tfstate.*
+
+# Lokale Variablen-Dateien
+*.tfvars
+*.tfvars.json
+
+# Crash-Logs
+crash.log
+crash.*.log
+
+# Claude Code lokale Einstellungen
+.claude/
