@@ -1,12 +1,16 @@
-# Vorlage für terraform.tfvars — am einfachsten per ./configure.sh erzeugen.
-# terraform.tfvars ist per .gitignore ausgeschlossen (enthält den API-Key).
+# Template for terraform.tfvars. The easiest way to create it is ./configure.sh.
+# terraform.tfvars is excluded via .gitignore because it contains the API key.
 
 digicert_url     = "https://one.digicert.com"
-digicert_api_key = "<DigiCert-ONE-API-Key>"
+digicert_api_key = "<DigiCert ONE API key>"
 profile_id       = "00000000-0000-0000-0000-000000000000"
 
 domain       = "www.example.com"
-organization = "Example GmbH"
+organization = "Example Inc."
 tags         = "terraform"
+
+# Re-issue key and certificate after this many days.
+# Must be shorter than the validity period of the TLM profile.
+renew_after_days = 3
 
 cert_dir = "/etc/certs"
