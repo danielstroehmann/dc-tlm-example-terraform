@@ -4,9 +4,9 @@
 #
 # Called by the systemd timer that install.sh sets up (tlm-cert-renew.timer),
 # but can also be run by hand. Terraform itself decides whether anything
-# needs to happen: once the renewal clock (time_rotating) has expired, key
-# and certificate are re-issued and nginx is reloaded; otherwise this is a
-# no-op.
+# needs to happen: once renew_at_percent of the current certificate's
+# validity has elapsed, key and certificate are re-issued and nginx is
+# reloaded; otherwise this is a no-op.
 #
 # Usage:
 #   ./renew.sh           # renew only if the renewal clock has expired

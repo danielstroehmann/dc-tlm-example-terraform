@@ -9,8 +9,9 @@ domain       = "www.example.com"
 organization = "Example Inc."
 tags         = "terraform"
 
-# Re-issue key and certificate after this many days.
-# Must be shorter than the validity period of the TLM profile.
-renew_after_days = 3
+# Re-issue key and certificate once this percentage of the current
+# certificate's validity has elapsed (validity is read from the certificate
+# on disk, so it follows whatever the profile issues).
+renew_at_percent = 70
 
 cert_dir = "/etc/certs"

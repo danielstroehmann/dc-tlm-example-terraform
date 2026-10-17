@@ -12,20 +12,27 @@ it. It assumes you know Terraform and have admin access to a DigiCert ONE accoun
 ## What happens on `terraform apply`
 
 ```
-time_rotating.renew ──┐ (renewal clock, expires every renew_after_days)
-                      ├─► tls_private_key.srv ─► tls_cert_request.srv ─► digicert_certificate.srv
-terraform_data.cert_params ┘ (profile_id)                                        │
-                                                                                 ▼
-                      local_sensitive_file.key   local_file.crt   local_file.nginx_site   local_file.index_html
-                                                        │
-                                                        ▼
-                                          terraform_data.nginx_reload  (nginx -t && systemctl reload nginx)
+cert on disk ─► data.tls_certificate.current ─► renew_at = notBefore + renew_at_percent · validity
+                                                      │
+                                           time_rotating.renew (expires at renew_at)
+                                                      │
+                                           terraform_data.renewal (bridge, keyed on the clock id)
+                                                      │
+                      ┌───────────────────────────────┤
+                      ▼                               ▼
+          tls_private_key.srv ─► tls_cert_request.srv ─► digicert_certificate.srv ◄─ terraform_data.cert_params (profile_id)
+                                                                   │
+                                                                   ▼
+                     local_sensitive_file.key   local_file.crt   local_file.nginx_site   local_file.index_html
+                                                       │
+                                                       ▼
+                                         terraform_data.nginx_reload  (nginx -t && systemctl reload nginx)
 ```
 
 1. A 2048-bit RSA key and a CSR (CN = `domain`, O = `organization`) are generated locally. The key never leaves the host.
 2. `digicert_certificate` POSTs the CSR to `/mpki/api/v1/certificate` on your DigiCert ONE instance and gets the PEM chain back.
 3. Key, certificate, an nginx site for `domain` and the demo page from `www/` are written to disk; nginx is reloaded.
-4. When the renewal clock expires, steps 1 to 3 run again with a fresh key. See [Renewal](#renewal).
+4. Once `renew_at_percent` of the certificate's validity has elapsed, steps 1 to 3 run again with a fresh key. See [Renewal](#renewal).
 
 ## DigiCert configuration
 
@@ -49,7 +56,7 @@ and create a profile (or reuse one) with these properties:
 | Authentication | API token | Lets a service user enroll with an `x-api-key` header. |
 | CSR | Required / provided by requester | The CSR is generated on the host; TLM must accept it instead of generating the key itself. |
 | Subject / SAN rules | CN taken from the CSR, SAN added by TLM or taken from CSR | The example sends only `common_name`. TLM profiles normally copy the CN into the SAN. If your profile insists on explicit SANs, add `dns_names = [var.domain]` to `digicert_certificate.srv`. |
-| Validity | Anything, e.g. 5 days | `renew_after_days` must be shorter than this. |
+| Validity | Anything, e.g. 5 days | Renewal adapts automatically: it happens after `renew_at_percent` of whatever validity TLM issues. |
 | CA / template | Public TLS or private CA, server authentication | nginx serves it; browsers must trust the issuing CA. |
 | Seat type and business unit | A seat pool with free seats | Each enrollment consumes a seat; TLM returns an error when the pool is exhausted. |
 
@@ -116,7 +123,7 @@ The `digicert/digicert` provider (v0.1.x) is minimal. Things worth knowing:
 | `domain` | — | FQDN; CN of the certificate and `server_name` in nginx |
 | `organization` | — | O in the CSR subject |
 | `tags` | `terraform` | Comma-separated, stored on the certificate in TLM |
-| `renew_after_days` | `3` | Whole days; must be shorter than the profile validity |
+| `renew_at_percent` | `70` | 1–99; share of the current certificate's validity after which it is re-issued |
 | `cert_dir` | `/etc/certs` | Where `tls.key` and `tls.crt` are written |
 
 ## Quick start
@@ -137,40 +144,71 @@ repository; it uses its own directory as the Terraform working directory.
 ## Renewal
 
 Terraform has no notion of time, and the provider has no notion of expiry.
-Renewal is built from three pieces:
+Renewal is built from four pieces:
 
-1. **A clock in the state.** `time_rotating.renew` stores its creation
-   timestamp plus `rotation_days`. Once that moment has passed, the next
-   `terraform plan` marks the resource for replacement.
-2. **Replacement that cascades.** `tls_private_key.srv` and
-   `digicert_certificate.srv` carry
-   `lifecycle { replace_triggered_by = [time_rotating.renew, ...] }`.
-   Replacing the clock replaces the key, which changes the CSR, and the
-   certificate is replaced explicitly as well. `create_before_destroy` on
-   both makes Terraform enroll the new certificate first, rewrite the files,
-   reload nginx and only then revoke the old certificate.
-3. **Something that runs `terraform apply`.** `install.sh` installs
+1. **The current certificate as input.** At plan time `main.tf` reads
+   `${cert_dir}/tls.crt` (the file the previous apply wrote) and parses it
+   with the `tls_certificate` data source. From `not_before` and `not_after`
+   it computes the renewal moment:
+
+   ```
+   renew_at = not_before + renew_at_percent % · (not_after − not_before)
+   ```
+
+   Terraform has no timestamp arithmetic, so the RFC 3339 strings are
+   converted to epoch seconds in HCL (Hinnant's `days_from_civil`, see the
+   `ts_*` locals). Reading the file instead of
+   `digicert_certificate.srv.certificate` is deliberate: the clock drives the
+   certificate's replacement, so it cannot also depend on it without a cycle.
+   Before the first apply the file holds the placeholder from `install.sh`
+   or does not exist; both are harmless because the real certificate is
+   enrolled on that apply regardless of the clock.
+
+2. **A clock in the state.** `time_rotating.renew` is set to
+   `rotation_rfc3339 = renew_at`. The provider compares that timestamp with
+   the current time on every plan and, once it has passed, reports the
+   resource as gone so that it is re-created. Moving `renew_at` (for example
+   after a new certificate appeared on disk) is an in-place update and does
+   not trigger anything. If `renew_at` is already in the past or within 10
+   minutes, the clock is instead aimed `renew_at_percent` of the old validity
+   into the future so it does not fire twice; the next plan corrects it to
+   the exact value for the new certificate.
+
+3. **A bridge that turns expiry into a replacement.** `replace_triggered_by`
+   reacts to *replace* and *update* actions, not to the *deleted + created*
+   pair `time_rotating` produces on expiry (verified with Terraform 1.16 and
+   `hashicorp/time` 0.14). `terraform_data.renewal` therefore has
+   `triggers_replace = [time_rotating.renew.id]`: a new clock id makes it a
+   proper replacement, and `tls_private_key.srv` and `digicert_certificate.srv`
+   list it in `replace_triggered_by`. A new key means a new CSR; the
+   certificate is listed explicitly as well because the provider would
+   otherwise accept the new CSR as an in-place update. `create_before_destroy`
+   on both makes Terraform enroll the new certificate first, rewrite the
+   files, reload nginx and only then revoke the old certificate.
+
+4. **Something that runs `terraform apply`.** `install.sh` installs
    `tlm-cert-renew.timer`, which calls `renew.sh` every 6 hours
    (`OnCalendar=*-*-* 00/6:00:00`, `Persistent=true`, 15 min jitter).
    `renew.sh` takes a lock, skips when no `terraform.tfvars` exists, and runs
    `terraform apply -auto-approve`. When the clock has not expired, that
    apply is a no-op.
 
-Timing: with 5-day certificates and `renew_after_days = 3`, renewal happens
-between day 3 and day 3.25, leaving well over a day of margin. The clock
-starts at the time of the apply that created it, not at the certificate's
-`notBefore`, so after `./renew.sh --force` the next renewal is again
-`renew_after_days` later. Changing `renew_after_days` updates the clock in
-place and triggers one immediate renewal.
+Timing: with a 5-day certificate and the default 70 %, `renew_at` is 3.5 days
+after `not_before`, and the timer picks it up within the next 6 hours, so
+the old certificate still has well over a day left. Because `not_before` is
+whatever the CA puts in the certificate (DigiCert backdates to 00:00 UTC of
+the issue day), the computed moment is tied to the certificate, not to when
+`terraform apply` happened to run.
 
-Changing `domain` or `organization` changes the CSR and therefore re-enrolls;
-changing `profile_id` re-enrolls through `terraform_data.cert_params`.
-Changing `tags` only is an in-place update in TLM.
+Changing `domain` or `organization` changes the CSR and therefore
+re-enrolls; changing `profile_id` re-enrolls through
+`terraform_data.cert_params`. Changing `tags` only is an in-place update in
+TLM. Changing `renew_at_percent` just moves the clock.
 
 ## Operations
 
 ```bash
-terraform output                           # serial, notBefore/notAfter, next_renewal_after
+terraform output                           # serial, notBefore/notAfter, next_renewal_after, renew_at_percent
 systemctl list-timers tlm-cert-renew.timer # next scheduled run
 journalctl -u tlm-cert-renew.service -n 50 # output of the last runs
 ./renew.sh --force                         # renew right now (new key + certificate)
@@ -195,6 +233,12 @@ openssl s_client -connect localhost:443 -servername "$(terraform output -raw cer
   if you prefer to let old certificates expire, remove the
   `digicert_certificate` resource from the state before replacing it, or
   change the lifecycle to your liking.
+* **The clock reads a file Terraform itself writes.** `main.tf` parses
+  `${cert_dir}/tls.crt` at plan time. If you delete or replace that file by
+  hand, the next plan computes the renewal moment from whatever it finds
+  there (or, if the file is missing, aims the clock one hour ahead and
+  re-enrolls on the following run). Only UTC timestamps (`...Z`) are
+  parsed, which is what the `tls` provider emits.
 * **Single host.** Paths (`/etc/nginx/sites-available/default`,
   `/var/www/html`) and the `local-exec` reload assume Terraform runs on the
   nginx host as root.
@@ -207,5 +251,7 @@ openssl s_client -connect localhost:443 -servername "$(terraform output -raw cer
 | HTTP 403 on apply | The API user's role lacks enroll permission on the profile's business unit |
 | Enrollment error mentioning the profile or enrollment method | Profile is not set to REST API enrollment, does not accept a CSR, or the seat pool is empty |
 | Plan shows `digicert_certificate.srv will be updated in-place` after changing the CSR | Expected provider behaviour; the `replace_triggered_by` rules in `main.tf` turn it into a replacement. Check that you did not remove them. |
+| Plan shows `time_rotating.renew has been deleted` / `will be created` but no certificate change | `terraform_data.renewal` is missing or no longer referenced in `replace_triggered_by`; `time_rotating` expiry alone does not trigger dependents. |
+| `next_renewal_after` is in the past but nothing renews | The timer is not running (`systemctl status tlm-cert-renew.timer`) or `renew.sh` fails; check `journalctl -u tlm-cert-renew.service`. |
 | `nginx -t` fails in the `local-exec` step | Key and certificate on disk do not belong together, usually after a partially failed apply. Run `./renew.sh --force`. |
 | Apply fails destroying an old, expired certificate | TLM refuses to revoke expired certificates. `terraform state rm digicert_certificate.srv`, then apply. |

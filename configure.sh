@@ -31,7 +31,7 @@ profile_id=""
 domain=""
 organization=""
 tags="terraform"
-renew_after_days="3"
+renew_at_percent="70"
 cert_dir="/etc/certs"
 
 read_existing() {
@@ -42,7 +42,7 @@ read_existing() {
        [[ "$line" =~ ^[[:space:]]*([a-z_]+)[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
       key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
       case "$key" in
-        digicert_url|digicert_api_key|profile_id|domain|organization|tags|renew_after_days|cert_dir)
+        digicert_url|digicert_api_key|profile_id|domain|organization|tags|renew_at_percent|cert_dir)
           printf -v "$key" '%s' "$val" ;;
       esac
     fi
@@ -110,7 +110,7 @@ valid_uuid()    { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a
 valid_fqdn()    { [[ "$1" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]] || { err "Must be an FQDN (e.g. www.example.com)."; return 1; }; }
 valid_abspath() { [[ "$1" == /* ]] || { err "Must be an absolute path."; return 1; }; }
 valid_text()    { [[ ! "$1" =~ [\"\\] ]] || { err "Quotes and backslashes are not allowed."; return 1; }; }
-valid_days()    { [[ "$1" =~ ^[1-9][0-9]*$ ]] || { err "Must be a whole number of days, at least 1."; return 1; }; }
+valid_percent() { [[ "$1" =~ ^[1-9][0-9]?$ ]] || { err "Must be a whole number between 1 and 99."; return 1; }; }
 
 # ── Questions ───────────────────────────────────────────────────────────
 log "DigiCert ONE / Trust Lifecycle Manager"
@@ -126,10 +126,11 @@ ask organization "Organization (O in the subject)" "$organization" valid_text
 ask tags         "Tags in TLM (comma-separated)"   "$tags"         valid_text
 
 log "Renewal"
-echo "    Key and certificate are re-issued after this many days. The value must be"
-echo "    shorter than the validity period of the TLM profile, e.g. 3 for 5-day"
-echo "    certificates. A systemd timer (installed by install.sh) runs the check."
-ask renew_after_days "Renew after (days)" "$renew_after_days" valid_days
+echo "    Key and certificate are re-issued once this percentage of the current"
+echo "    certificate's validity has elapsed (70 = after 3.5 days of a 5-day cert)."
+echo "    The validity is read from the issued certificate, so this follows the"
+echo "    profile. A systemd timer (installed by install.sh) runs the check."
+ask renew_at_percent "Renew at (% of validity)" "$renew_at_percent" valid_percent
 
 log "Storage on the server"
 ask cert_dir "Directory for key and certificate" "$cert_dir" valid_abspath
@@ -143,7 +144,7 @@ printf '    %-18s %s\n' \
   "Domain:"         "$domain" \
   "Organization:"   "$organization" \
   "Tags:"           "$tags" \
-  "Renew after:"    "${renew_after_days} days" \
+  "Renew at:"       "${renew_at_percent} % of validity" \
   "Cert directory:" "$cert_dir" \
   "Target file:"    "$TFVARS"
 echo
@@ -167,7 +168,7 @@ domain       = "${domain}"
 organization = "${organization}"
 tags         = "${tags}"
 
-renew_after_days = ${renew_after_days}
+renew_at_percent = ${renew_at_percent}
 
 cert_dir = "${cert_dir}"
 TFV

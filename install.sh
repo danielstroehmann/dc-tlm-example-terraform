@@ -13,7 +13,7 @@
 #   3. writes a bootstrap nginx site (replaced by Terraform on first apply)
 #   4. runs `terraform init`
 #   5. installs a systemd timer that runs ./renew.sh every 6 hours so the
-#      certificate is re-issued automatically (see renew_after_days)
+#      certificate is re-issued automatically (see renew_at_percent)
 #
 # Everything that matters (domain, API key, profile ID, cert_dir, ...) is
 # NOT set here but in terraform.tfvars via ./configure.sh.
@@ -136,7 +136,7 @@ fi
 # ── 7. systemd timer for automatic renewal ──────────────────────────────
 # Terraform only renews when `terraform apply` is actually run. The timer
 # calls renew.sh every 6 hours; renew.sh is a no-op until terraform.tfvars
-# exists and until the renewal clock (renew_after_days) has expired.
+# exists and until renew_at_percent of the certificate validity has elapsed.
 log "Installing systemd timer ${TIMER_NAME} (runs renew.sh every 6 hours)"
 cat > "/etc/systemd/system/${TIMER_NAME}.service" <<EOT
 [Unit]

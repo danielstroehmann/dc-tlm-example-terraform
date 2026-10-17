@@ -8,10 +8,11 @@
 #   - digicert_url     -> DigiCert ONE instance
 #   - digicert_api_key -> DigiCert ONE / TLM API key
 #   - profile_id       -> TLM certificate profile
-#   - renew_after_days -> how often key and certificate are re-issued
+#   - renew_at_percent -> renew after this share of the validity has elapsed
 #
 # Flow:
-#   1. time_rotating          -> renewal clock, "expires" every renew_after_days
+#   1. time_rotating          -> renewal clock, set to notBefore + renew_at_percent
+#                                of the validity of the certificate currently on disk
 #   2. tls_private_key        -> private key (never leaves the machine)
 #   3. tls_cert_request       -> CSR built from the local key
 #   4. digicert_certificate   -> certificate enrolled from the TLM profile
@@ -20,11 +21,14 @@
 #                                and the demo page from www/
 #   7. terraform_data         -> reload nginx whenever cert or site change
 #
-# Renewal: when the renewal clock expires, key, CSR and certificate are
-# replaced (the provider would otherwise only "update" the certificate
-# in place without re-enrolling it). create_before_destroy makes sure the
-# new certificate is issued and written to disk before the old one is
-# revoked in TLM.
+# Renewal: the certificate currently served by nginx is parsed at plan
+# time, its renewal moment is computed as notBefore + renew_at_percent of
+# (notAfter - notBefore), and a time_rotating clock is set to that moment.
+# When the clock expires, terraform_data.renewal is replaced, which in
+# turn replaces key, CSR and certificate (the provider would otherwise
+# only "update" the certificate in place without re-enrolling it).
+# create_before_destroy makes sure the new certificate is issued and
+# written to disk before the old one is revoked in TLM.
 # Something has to run `terraform apply` regularly for this to happen;
 # install.sh sets up a systemd timer that calls renew.sh.
 ########################################################################
@@ -45,10 +49,57 @@ provider "digicert" {
 }
 
 # ── Renewal clock ───────────────────────────────────────────────────────
-# Gets replaced once rotation_days have passed, which in turn forces the
-# key and the certificate below to be re-created.
+# The clock cannot be derived from digicert_certificate.srv (that would be
+# a dependency cycle), so the validity is read from the certificate file
+# written by the previous apply. Before the first apply this is the
+# placeholder certificate from install.sh or nothing at all; both cases
+# are harmless because the real certificate is enrolled anyway.
+locals {
+  crt_path    = "${var.cert_dir}/tls.crt"
+  current_crt = fileexists(local.crt_path) ? file(local.crt_path) : ""
+}
+
+data "tls_certificate" "current" {
+  count   = local.current_crt != "" ? 1 : 0
+  content = local.current_crt
+}
+
+locals {
+  cur_leaf = [for c in try(data.tls_certificate.current[0].certificates, []) : c if !c.is_ca]
+  have_cur = length(local.cur_leaf) > 0
+  cur_ts   = local.have_cur ? { nb = local.cur_leaf[0].not_before, na = local.cur_leaf[0].not_after } : {}
+
+  # RFC 3339 (UTC) -> seconds since epoch. Terraform has no timestamp
+  # arithmetic, so this is Howard Hinnant's days_from_civil in HCL.
+  ts_parts = { for k, v in local.cur_ts : k => [for x in regex("^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})", v) : tonumber(x)] }
+  ts_y     = { for k, p in local.ts_parts : k => p[0] - (p[1] <= 2 ? 1 : 0) }
+  ts_era   = { for k, y in local.ts_y : k => floor(y / 400) }
+  ts_yoe   = { for k, y in local.ts_y : k => y - local.ts_era[k] * 400 }
+  ts_doy   = { for k, p in local.ts_parts : k => floor((153 * ((p[1] + 9) % 12) + 2) / 5) + p[2] - 1 }
+  ts_doe   = { for k, p in local.ts_parts : k => local.ts_yoe[k] * 365 + floor(local.ts_yoe[k] / 4) - floor(local.ts_yoe[k] / 100) + local.ts_doy[k] }
+  ts_unix  = { for k, p in local.ts_parts : k => (local.ts_era[k] * 146097 + local.ts_doe[k] - 719468) * 86400 + p[3] * 3600 + p[4] * 60 + p[5] }
+
+  lifetime_s = local.have_cur ? local.ts_unix.na - local.ts_unix.nb : 0
+  renew_in_s = floor(local.lifetime_s * var.renew_at_percent / 100)
+  renew_at   = local.have_cur ? timeadd(local.cur_ts.nb, "${local.renew_in_s}s") : null
+
+  # The clock must always point into the future. If the current
+  # certificate is already due (or within 10 minutes of it), aim at the
+  # renewal moment of the certificate that is about to be issued instead;
+  # the next plan corrects it to the exact value.
+  renew_due    = local.have_cur && timecmp(local.renew_at, timeadd(plantimestamp(), "10m")) <= 0
+  clock_target = local.have_cur && !local.renew_due ? local.renew_at : timeadd(plantimestamp(), "${max(local.renew_in_s, 3600)}s")
+}
+
 resource "time_rotating" "renew" {
-  rotation_days = var.renew_after_days
+  rotation_rfc3339 = local.clock_target
+}
+
+# Bridge: time_rotating announces expiry as "deleted + created", which
+# replace_triggered_by ignores. A terraform_data keyed on the clock's id
+# is planned as a proper replacement and does trigger the dependents.
+resource "terraform_data" "renewal" {
+  triggers_replace = [time_rotating.renew.id]
 }
 
 # ── Locally generated key + CSR ─────────────────────────────────────────
@@ -57,7 +108,7 @@ resource "tls_private_key" "srv" {
   rsa_bits  = 2048
 
   lifecycle {
-    replace_triggered_by  = [time_rotating.renew]
+    replace_triggered_by  = [terraform_data.renewal]
     create_before_destroy = true
   }
 }
@@ -88,7 +139,7 @@ resource "digicert_certificate" "srv" {
 
   lifecycle {
     replace_triggered_by = [
-      time_rotating.renew,
+      terraform_data.renewal,
       tls_cert_request.srv.cert_request_pem,
       terraform_data.cert_params,
     ]
@@ -178,3 +229,4 @@ output "certificate_domain" { value = var.domain }
 output "certificate_not_before" { value = local.leaf_cert.not_before }
 output "certificate_not_after" { value = local.leaf_cert.not_after }
 output "next_renewal_after" { value = time_rotating.renew.rotation_rfc3339 }
+output "renew_at_percent" { value = var.renew_at_percent }

@@ -62,14 +62,14 @@ variable "tags" {
 }
 
 # ── Renewal ─────────────────────────────────────────────────────────────
-variable "renew_after_days" {
-  description = "Re-issue key and certificate after this many days. Must be shorter than the validity period of the TLM profile; for 5-day certificates 3 is a sensible value."
+variable "renew_at_percent" {
+  description = "Re-issue key and certificate once this percentage of the current certificate's validity period has elapsed. The validity is read from the certificate on disk, so this adapts to whatever the TLM profile issues."
   type        = number
-  default     = 3
+  default     = 70
 
   validation {
-    condition     = var.renew_after_days >= 1 && floor(var.renew_after_days) == var.renew_after_days
-    error_message = "renew_after_days must be a whole number of at least 1."
+    condition     = var.renew_at_percent >= 1 && var.renew_at_percent <= 99
+    error_message = "renew_at_percent must be between 1 and 99."
   }
 }
 
