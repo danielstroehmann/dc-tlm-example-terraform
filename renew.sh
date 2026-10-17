@@ -8,7 +8,18 @@
 # and certificate are re-issued and nginx is reloaded; otherwise this is a
 # no-op.
 #
+# Usage:
+#   ./renew.sh           # renew only if the renewal clock has expired
+#   ./renew.sh --force   # renew now: restarts the clock, re-issues key + cert
+#
 set -euo pipefail
+
+FORCE=()
+case "${1:-}" in
+  --force) FORCE=(-replace=time_rotating.renew) ;;
+  "") ;;
+  *) echo "Usage: $0 [--force]" >&2; exit 2 ;;
+esac
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCK="/run/lock/tlm-cert-renew.lock"
@@ -28,4 +39,4 @@ if [[ ! -d "${DIR}/.terraform" ]]; then
   terraform -chdir="$DIR" init -input=false -no-color
 fi
 
-terraform -chdir="$DIR" apply -auto-approve -input=false -no-color
+terraform -chdir="$DIR" apply -auto-approve -input=false -no-color "${FORCE[@]}"

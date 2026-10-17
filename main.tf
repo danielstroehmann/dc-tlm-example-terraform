@@ -17,6 +17,7 @@
 #   4. digicert_certificate   -> certificate enrolled from the TLM profile
 #   5. local_(sensitive_)file -> key + certificate written to cert_dir
 #   6. local_file             -> nginx site with server_name = domain
+#                                and the demo page from www/
 #   7. terraform_data         -> reload nginx whenever cert or site change
 #
 # Renewal: when the renewal clock expires, key, CSR and certificate are
@@ -140,6 +141,13 @@ resource "local_file" "nginx_site" {
         }
     }
   EOT
+}
+
+# ── Demo page served by nginx ───────────────────────────────────────────
+resource "local_file" "index_html" {
+  filename        = "/var/www/html/index.html"
+  content         = file("${path.module}/www/index.html")
+  file_permission = "0644"
 }
 
 # ── Reload nginx whenever certificate or site change ────────────────────
