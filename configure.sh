@@ -92,8 +92,8 @@ ask_secret() {
     if [[ -z "$input" ]]; then
       err "A value is required."; continue
     fi
-    if [[ "$input" =~ [[:space:]\"] ]]; then
-      err "The API key must not contain whitespace or quotes."; continue
+    if [[ "$input" =~ [[:space:]\"\\] || "$input" =~ [\$%]\{ ]]; then
+      err "The API key must not contain whitespace, quotes, backslashes or \${ sequences."; continue
     fi
     printf -v "$var" '%s' "$input"
     return
@@ -109,7 +109,7 @@ valid_url()     { [[ "$1" =~ ^https://[^/[:space:]]+$ ]] || { err "Must start wi
 valid_uuid()    { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { err "Must be a UUID (e.g. 123e4567-e89b-12d3-a456-426614174000)."; return 1; }; }
 valid_fqdn()    { [[ "$1" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]] || { err "Must be an FQDN (e.g. www.example.com)."; return 1; }; }
 valid_abspath() { [[ "$1" == /* ]] || { err "Must be an absolute path."; return 1; }; }
-valid_text()    { [[ ! "$1" =~ [\"\\] ]] || { err "Quotes and backslashes are not allowed."; return 1; }; }
+valid_text()    { [[ ! "$1" =~ [\"\\] && ! "$1" =~ [\$%]\{ ]] || { err "Quotes, backslashes and \${ / %{ sequences are not allowed."; return 1; }; }
 valid_percent() { [[ "$1" =~ ^[1-9][0-9]?$ ]] || { err "Must be a whole number between 1 and 99."; return 1; }; }
 
 # ── Questions ───────────────────────────────────────────────────────────
